@@ -1,5 +1,3 @@
-// main.cpp
-
 #include <iostream>
 #include <string>
 #include <vector>
@@ -12,13 +10,26 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
+#include <thread>
+#include <mutex>
 #include "reactor.hpp"
+#include "proactor.hpp"
+#include <map> // Include map for storing client information
+
+// Define a structure to store client information
+struct ClientInfo {
+    int client_fd;
+    pthread_t thread_id;
+};
+
 
 #define PORT "9034"
 
 using namespace std;
 
 vector<vector<int>> adjMat;
+mutex adjMatMutex; // Mutex to protect the adjacency matrix since it is shared among threads.
+
 
 void dfs(int node, vector<bool>& visited, stack<int>& st) {
     visited[node] = true;
@@ -80,7 +91,7 @@ vector<vector<int>> inputGraph(int n, int m, int client_fd) {
     vector<vector<int>> adj(n, vector<int>(n, 0));
     for (int i = 0; i < m; ++i) {
         char buf[256];
-        int bytes_received = recv(client_fd, buf, sizeof buf, 0);
+        int bytes_received = recv(client_fd, buf, sizeof(buf), 0);
         if (bytes_received <= 0) {
             cerr << "Error receiving graph input from client" << endl;
             break;
@@ -90,10 +101,12 @@ vector<vector<int>> inputGraph(int n, int m, int client_fd) {
         sscanf(buf, "%d %d", &u, &v);
         adj[u-1][v-1] = 1; // Assuming edges are 1-based, adjust to 0-based indexing
     }
+    cout << "Graph input received" << endl;
     return adj;
 }
 
 void printStronglyConnectedComponents(const vector<vector<int>>& scc, int client_fd) {
+    // Print the strongly connected components
     for (const auto& component : scc) {
         string result;
         for (int node : component) {
@@ -115,9 +128,12 @@ void HandleCommand(const string& command, int client_fd) {
             int n = stoi(command.substr(pos, next_space - pos));
             pos = next_space + 1;
             int m = stoi(command.substr(pos));
+            lock_guard<mutex> lock(adjMatMutex); // Lock the adjacency matrix while updating it.
             adjMat = inputGraph(n, m, client_fd);
+            
         } else if (command.substr(0, 8) == "Kosaraju") {
             cout << "Processing Kosaraju command" << endl;
+            lock_guard<mutex> lock(adjMatMutex);
             vector<vector<int>> scc = kosaraju(adjMat.size());
             printStronglyConnectedComponents(scc, client_fd);
         } else if (command.substr(0, 7) == "Newedge") {
@@ -127,7 +143,10 @@ void HandleCommand(const string& command, int client_fd) {
             int u = stoi(command.substr(pos, next_space - pos));
             pos = next_space + 1;
             int v = stoi(command.substr(pos));
-            adjMat[u-1][v-1] = 1;
+            {
+                lock_guard<mutex> lock(adjMatMutex);
+                adjMat[u-1][v-1] = 1;
+            }
             send(client_fd, "Edge added\n", 11, 0);
         } else if (command.substr(0, 10) == "Removeedge") {
             cout << "Processing Removeedge command" << endl;
@@ -136,7 +155,10 @@ void HandleCommand(const string& command, int client_fd) {
             int u = stoi(command.substr(pos, next_space - pos));
             pos = next_space + 1;
             int v = stoi(command.substr(pos));
-            adjMat[u-1][v-1] = 0;
+            {
+                lock_guard<mutex> lock(adjMatMutex);
+                adjMat[u-1][v-1] = 0;
+            }
             send(client_fd, "Edge removed\n", 13, 0);
         } else {
             cout << "Unknown command: " << command << endl;
@@ -147,6 +169,8 @@ void HandleCommand(const string& command, int client_fd) {
         send(client_fd, "Error processing command\n", 25, 0);
     }
 }
+
+
 
 // Get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa) {
@@ -217,110 +241,111 @@ void del_from_pfds(vector<pollfd>& pfds, int i) {
     pfds.erase(pfds.begin() + i);
 }
 
-// Main
-int main() {
-    int listener;     // Listening socket descriptor
-
-    int newfd;        // Newly accept()ed socket descriptor
-    struct sockaddr_storage remoteaddr; // Client address
-    socklen_t addrlen;
-
-    char buf[256];    // Buffer for client data
-
-    char remoteIP[INET6_ADDRSTRLEN];
-
-    // Start off with room for 5 connections
-    // (We'll realloc as necessary)
-    vector<pollfd> pfds;
-    pfds.reserve(5);
-
-    // Set up and get a listening socket
-    listener = get_listener_socket();
-
-    if (listener == -1) {
-        cerr << "error getting listening socket" << endl;
-        exit(1);
-    }
-
-    // Add the listener to set
-    pfds.push_back({listener, POLLIN, 0});
-
-     auto commandHandler = [](int client_fd) {
-        char buf[256];
+void* proactorFunction(int client_fd) {
+    char buf[256];
+    while (true) {
         int nbytes = recv(client_fd, buf, sizeof(buf), 0);
-
         if (nbytes <= 0) {
             if (nbytes == 0) {
-                cout << "pollserver: socket " << client_fd << " hung up" << endl;
+                cout << "Client " << client_fd << " disconnected" << endl;
             } else {
                 perror("recv");
             }
-
             close(client_fd);
-            // Optionally remove from pfds and Reactor, if necessary
+            break;
         } else {
             string command(buf, nbytes);
             HandleCommand(command, client_fd);
         }
-    };
+    }
+    return nullptr;
+}
 
-    // Reactor setup
-    Reactor reactor;
-    reactor.startReactor();
 
-    // Main loop
-    for (;;) {
-        int poll_count = poll(pfds.data(), pfds.size(), -1);
+int main() {
+    int listener = get_listener_socket();
+    if (listener == -1) {
+        cerr << "Error getting listener socket" << endl;
+        return 1;
+    }
 
-        if (poll_count == -1) {
-            perror("poll");
-            exit(1);
+    // Reusable set of file descriptors
+    fd_set master;
+    fd_set read_fds;
+    int fdmax;
+
+    std::map<int, ClientInfo> clients;
+
+    FD_ZERO(&master);
+    FD_ZERO(&read_fds);
+    FD_SET(listener, &master);
+    fdmax = listener;
+
+    cout << "Waiting for connections..." << endl;
+
+    while (true) {
+        read_fds = master;
+        if (select(fdmax + 1, &read_fds, NULL, NULL, NULL) == -1) {
+            cerr << "Select error" << endl;
+            return 1;
         }
 
-        for (size_t i = 0; i < pfds.size(); i++) {
-            if (pfds[i].revents & POLLIN) {
-                if (pfds[i].fd == listener) {
-                    addrlen = sizeof remoteaddr;
-                    newfd = accept(listener, (struct sockaddr*)&remoteaddr, &addrlen);
-
+        for (int i = 0; i <= fdmax; ++i) {
+            if (FD_ISSET(i, &read_fds)) {
+                if (i == listener) {
+                    struct sockaddr_storage remoteaddr;
+                    socklen_t addrlen = sizeof remoteaddr;
+                    int newfd = accept(listener, (struct sockaddr *)&remoteaddr, &addrlen);
                     if (newfd == -1) {
-                        perror("accept");
+                        cerr << "Accept error" << endl;
                     } else {
-                        add_to_pfds(pfds, newfd);
+                        FD_SET(newfd, &master);
+                        if (newfd > fdmax) {
+                            fdmax = newfd;
+                        }
+                        cout << "New connection from " << inet_ntoa(((struct sockaddr_in *)&remoteaddr)->sin_addr) << " on socket " << newfd << endl;
 
-                        cout << "pollserver: new connection from "
-                             << inet_ntop(remoteaddr.ss_family,
-                                          get_in_addr((struct sockaddr*)&remoteaddr),
-                                          remoteIP, INET6_ADDRSTRLEN)
-                             << " on socket " << newfd << endl;
-
-                        // Add new connection to Reactor
-                        reactor.addFdToReactor(newfd, commandHandler);
+                        // Start a proactor thread
+                        pthread_t tid = startProactor(newfd, proactorFunction);
+                        if (tid == 0) {
+                            cerr << "Failed to start proactor thread" << endl;
+                        } else {
+                            clients[newfd] = {newfd, tid};
+                        }
                     }
                 } else {
-                    int sender_fd = pfds[i].fd;
-                    int nbytes = recv(sender_fd, buf, sizeof(buf), 0);
-
-                    if (nbytes <= 0) {
-                        if (nbytes == 0) {
-                            cout << "pollserver: socket " << sender_fd << " hung up" << endl;
+                    char buf[256];
+                    int bytes_received = recv(i, buf, sizeof buf, 0);
+                    if (bytes_received <= 0) {
+                        if (bytes_received == 0) {
+                            
+                            cout << "Socket " << i << " hung up" << endl;
                         } else {
-                            perror("recv");
+                            cerr << "Receive error on socket " << i << endl;
+                        }
+                        close(i);
+                        FD_CLR(i, &master);
+
+                         // Find and stop the corresponding proactor thread
+                        auto it = clients.find(i);
+                        if (it != clients.end()) {
+                            stopProactor(it->second.thread_id);
+                            clients.erase(it); // Erase client info from map
                         }
 
-                        close(sender_fd);
-                        del_from_pfds(pfds, i);
-
-                        // Remove from Reactor
-                        reactor.removeFdFromReactor(sender_fd);
                     } else {
-                        // Process received command
-                        string command(buf, nbytes);
-                        HandleCommand(command, sender_fd);
+                        buf[bytes_received] = '\0';
+                        string command(buf);
+                        HandleCommand(command, i);
                     }
                 }
             }
         }
+    }
+
+
+  for (const auto& client : clients) {
+        stopProactor(client.second.thread_id);
     }
 
     return 0;
