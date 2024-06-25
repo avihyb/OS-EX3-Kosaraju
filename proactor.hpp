@@ -5,6 +5,7 @@
 
 // Define proactorFunc as a function pointer type that takes an int argument
 typedef void* (*proactorFunc)(int);
+void* proactorThreadWrapper(void* arg);
 
 // Function to start a proactor thread
 pthread_t startProactor(int client_fd, proactorFunc func);

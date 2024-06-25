@@ -12,7 +12,6 @@
 #include <poll.h>
 #include <thread>
 #include <mutex>
-#include "reactor.hpp"
 #include "proactor.hpp"
 #include <map> // Include map for storing client information
 

@@ -5,7 +5,7 @@ CC = g++
 CFLAGS = -Wall -g
 
 # Source files (one for each executable)
-SRCS = Kosaraju.cpp Kosaraju-List.cpp Kosaraju-Deque.cpp Kosaraju-3.cpp Kosaraju-4.cpp Kosaraju-7-Threads.cpp Kosaraju-Proactor.cpp Kosaraju-10.cpp
+SRCS = Kosaraju.cpp Kosaraju-List.cpp Kosaraju-Deque.cpp Kosaraju-3.cpp Kosaraju-4.cpp Kosaraju-7-Threads.cpp 
 
 # Object files (one for each source file)
 OBJS = $(SRCS:.cpp=.o)
@@ -14,7 +14,7 @@ OBJS = $(SRCS:.cpp=.o)
 EXES = $(SRCS:.cpp=.exe)
 
 # Default target: build all executables
-all: $(EXES) reactor proactor
+all: $(EXES) reactor proactor kosaraju10
 
 reactor: reactor.cpp Kosaraju-5.cpp
 	$(CC) $(CFLAGS) Kosaraju-5.cpp reactor.cpp -o Kosaraju-Reactor-5
@@ -35,4 +35,4 @@ kosaraju10: Kosaraju-10.cpp proactor.cpp
 
 # Clean up object files and executables
 clean:
-	rm -f $(OBJS) $(EXES)
+	rm -f $(OBJS) $(EXES) Kosaraju-10 Kosaraju-Reactor-5 Kosaraju-Proactor
