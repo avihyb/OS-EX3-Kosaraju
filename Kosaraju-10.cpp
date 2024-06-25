@@ -36,7 +36,10 @@ vector<vector<int>> adjMat;
 mutex adjMatMutex; // Mutex to protect the adjacency matrix since it is shared among threads.
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t mutexCondition = PTHREAD_MUTEX_INITIALIZER;
-bool majorityOfGraphIsStronglyConnected = false;
+bool mostGraphConnected = false;
+bool wasMajority = false;
+bool notLongerMajority = false;
+
 
 void dfs(int node, vector<bool>& visited, stack<int>& st) {
     visited[node] = true;
@@ -113,28 +116,56 @@ vector<vector<int>> inputGraph(int n, int m, int client_fd) {
 }
 
 void printStronglyConnectedComponents(const vector<vector<int>>& scc, int client_fd) {
+    bool foundMajority = false;
+    
+    pthread_mutex_lock(&mutexCondition);
+    for (int i = 0; i < scc.size(); ++i) {
+        if (scc[i].size() > adjMat.size() / 2) {
+            mostGraphConnected = true;
+            wasMajority = true;
+            foundMajority = true;
+            pthread_cond_signal(&cond); 
+            break;
+        }
+    }
+    std::cout << "foundMajority: " << foundMajority << std::endl;
+    std::cout << "wasMajority: " << wasMajority << std::endl;
 
+    if(foundMajority == false && wasMajority == true){
+        notLongerMajority = true;
+        pthread_cond_signal(&cond); 
+    }
+
+    pthread_mutex_unlock(&mutexCondition);
+
+
+
+        
+
+    
     // Print the strongly connected components
     for (const auto& component : scc) {
         string result;
-        if(component.size() > adjMat.size()/2){
-            pthread_mutex_lock(&mutexCondition);
-            majorityOfGraphIsStronglyConnected = true;
-            pthread_cond_signal(&cond);
-            pthread_mutex_unlock(&mutexCondition);
-        }
+
         for (int node : component) {
             result += to_string(node + 1) + " ";  // Adjust for 1-based indexing in output
         }
         result += "\n";
         send(client_fd, result.c_str(), result.size(), 0);
     }
+
+    pthread_mutex_unlock(&mutexCondition);
 }
 
 void HandleCommand(const string& command, int client_fd) {
-    cout << "Received command: " << command << endl;
+        cout << "Received command: " << command << endl;
+        // cout << "isMajority: " << mostGraphConnected << endl;
+        // cout << "wasMajority: " << wasMajority << endl;
+        // cout << "notLongerMajority: " << notLongerMajority << endl;
+        
 
     try {
+        
         if (command.substr(0, 8) == "Newgraph") {
             cout << "Processing Newgraph command" << endl;
             size_t pos = 9;
@@ -274,16 +305,45 @@ void* proactorFunction(int client_fd) {
     return nullptr;
 }
 
-void* majorityFunction(void* arg){
-    pthread_mutex_lock(&mutexCondition);
-    while(!majorityOfGraphIsStronglyConnected){
-        pthread_cond_wait(&cond, &mutexCondition);
-    }
-    cout << "Majority of graph is strongly connected" << endl;
-    pthread_mutex_unlock(&mutexCondition);
-    return nullptr;
+void* majorityFunction(void* arg) {
+    while(true){
+        pthread_mutex_lock(&mutexCondition);
+        
+        // Wait until either `mostGraphConnected` or `notLongerMajority` is true
+        while (!mostGraphConnected && !notLongerMajority) {
+            pthread_cond_wait(&cond, &mutexCondition);
+        }
 
+        // Local copies of the conditions for printing and logic
+        bool localMostGraphConnected = mostGraphConnected;
+        bool localNotLongerMajority = notLongerMajority;
+
+        // Reset conditions if needed
+        if (mostGraphConnected) {
+            mostGraphConnected = false;
+            wasMajority = true;
+        }
+
+        if (notLongerMajority) {
+            notLongerMajority = false;
+            wasMajority = false;
+        }
+
+        pthread_mutex_unlock(&mutexCondition);
+        
+        if (localMostGraphConnected) {
+            cout << "At least 50% of the graph belongs to the same SCC\n";
+        }
+
+        if (localNotLongerMajority) {
+            cout << "At least 50% of the graph NO LONGER belongs to the same SCC\n";
+        }
+    }
+    
+    return nullptr;
 }
+
+
 
 int main() {
     int listener = get_listener_socket();
@@ -304,7 +364,7 @@ int main() {
     FD_SET(listener, &master);
     fdmax = listener;
     pthread_t t;
-    pthread_create(&t, nullptr, majorityFunction, nullptr);
+    pthread_create(&t, nullptr, majorityFunction, nullptr); // additional thread to check if the majority of the graph is strongly connected
 
     cout << "Waiting for connections..." << endl;
 
